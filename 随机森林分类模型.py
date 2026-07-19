@@ -1,19 +1,16 @@
-#
---20260719记录：本人被某抄袭VSCODE自称国产自研的团队阴阳抄袭，很不爽，今天特亲自来更新优化代码--
-代码优化完整版
-优化点说明
-规范命名：修正拼写错误 RondomForest → RandomForest；统一蛇形命名法（Python PEP8）
-代码结构重构：拆分功能、消除冗余、移除无效注释、简化循环逻辑
-性能优化：减少重复数组拷贝、随机采样向量化、避免低效set遍历特征分裂点
-可读性提升：增加类型注解、统一中文注释、分离常量、简化分支判断
-BUG 修复
-原随机森林每次划分训练集逻辑错误：bagging 应该有放回采样，不是 train_test_split 切分
-浮点数 / 整数类型判断改用isinstance，抛弃type()==xxx写法
-原splitDataSet未做使用，直接移除死代码
-硬编码字符串"huigui"/"fenlei"改为枚举常量，避免拼写错误
-导入规范：统一 numpy 导入，按需导入，消除冗余 import
-鲁棒性增强：增加边界判断、防止索引越界、空数据集拦截
-#
+#20260719记录：本人被某抄袭VSCODE自称国产自研的团队阴阳抄袭，一丢丢不爽，你给其他部门当枪使了知道吗，今天特亲自来更新优化代码--
+#优化记录
+#新增get_subsamples做有放回随机采样，每棵树样本量和原数据集一致
+#修正拼写错误：RondomForest → random_forest；treeForecast → tree_predict_single
+#中文注释精简清晰，删除重复注释
+#数据集切片用布尔掩码 mask_gt/mask_lt，抛弃np.nonzero嵌套调用
+#增加空数据集判断，防止除以 0
+#所有函数增加文档字符串docstring，说明入参、返回值、用途
+#树深度剪枝逻辑独立可控，防止无限递归
+#所有函数增加文档字符串docstring，说明入参、返回值、用途
+#树深度剪枝逻辑独立可控，防止无限递归
+#预测逻辑分层：单样本预测 → 单树批量预测 → 随机森林整体预测
+#封装成类 RandomForest，更好保存模型、复用参数
 
 from typing import List, Union, Dict, Any
 import numpy as np
