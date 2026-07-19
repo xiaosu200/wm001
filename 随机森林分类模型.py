@@ -1,3 +1,296 @@
+#
+--20260719记录：本人被某抄袭VSCODE自称国产自研的团队阴阳抄袭，很不爽，今天特亲自来更新优化代码--
+代码优化完整版
+优化点说明
+规范命名：修正拼写错误 RondomForest → RandomForest；统一蛇形命名法（Python PEP8）
+代码结构重构：拆分功能、消除冗余、移除无效注释、简化循环逻辑
+性能优化：减少重复数组拷贝、随机采样向量化、避免低效set遍历特征分裂点
+可读性提升：增加类型注解、统一中文注释、分离常量、简化分支判断
+BUG 修复
+原随机森林每次划分训练集逻辑错误：bagging 应该有放回采样，不是 train_test_split 切分
+浮点数 / 整数类型判断改用isinstance，抛弃type()==xxx写法
+原splitDataSet未做使用，直接移除死代码
+硬编码字符串"huigui"/"fenlei"改为枚举常量，避免拼写错误
+导入规范：统一 numpy 导入，按需导入，消除冗余 import
+鲁棒性增强：增加边界判断、防止索引越界、空数据集拦截
+#
+
+from typing import List, Union, Dict, Any
+import numpy as np
+from numpy import inf
+from sklearn.model_selection import train_test_split
+from sklearn.datasets import make_classification
+
+# 任务类型常量，替代硬编码字符串，避免写错
+TASK_REGRESSION = "regression"
+TASK_CLASSIFICATION = "classification"
+
+
+def get_datasets(n_samples: int = 200, n_features: int = 100, n_classes: int = 2) -> np.ndarray:
+    """
+    生成二分类模拟数据集，特征列+最后一列为标签
+    :param n_samples: 样本总量
+    :param n_features: 特征维度
+    :param n_classes: 分类类别数
+    :return: 拼接后数据集 [n_samples, n_features+1]
+    """
+    X, y = make_classification(n_samples=n_samples, n_features=n_features, n_classes=n_classes)
+    # 拼接特征与标签
+    dataset = np.concatenate([X, y.reshape(-1, 1)], axis=1)
+    return dataset
+
+
+def get_subsamples(dataset: np.ndarray, n_sample: int) -> List[np.ndarray]:
+    """
+    Bootstrap有放回采样，生成n份子集（随机森林Bagging采样）
+    :param dataset: 原始数据集
+    :param n_sample: 需要生成的子集数量
+    :return: 子集列表
+    """
+    n_rows = dataset.shape[0]
+    subs = []
+    for _ in range(n_sample):
+        # 向量化随机索引，替代内层循环
+        rand_idx = np.random.randint(0, n_rows, size=n_rows)
+        subs.append(dataset[rand_idx, :])
+    return subs
+
+
+def bin_split_dataset(dataset: np.ndarray, feature: int, split_val: float) -> tuple[np.ndarray, np.ndarray]:
+    """
+    根据指定特征与分裂值二分数据集
+    :param dataset: 输入数据集
+    :param feature: 待分裂特征下标
+    :param split_val: 分裂阈值
+    :return: 大于阈值子集、小于阈值子集
+    """
+    mask_gt = dataset[:, feature] > split_val
+    mask_lt = dataset[:, feature] < split_val
+    mat0 = dataset[mask_gt]
+    mat1 = dataset[mask_lt]
+    return mat0, mat1
+
+
+def reg_error(dataset: np.ndarray) -> float:
+    """回归任务：计算数据集总方差（分裂损失）"""
+    label_col = dataset[:, -1]
+    return np.var(label_col) * len(label_col)
+
+
+def reg_leaf(dataset: np.ndarray) -> float:
+    """回归叶子节点：返回样本均值"""
+    return np.mean(dataset[:, -1])
+
+
+def majority_class(dataset: np.ndarray) -> int:
+    """分类叶子节点：返回样本中占比最多的类别（仅二分类）"""
+    labels = dataset[:, -1]
+    cnt0 = np.sum(labels == 0)
+    cnt1 = np.sum(labels == 1)
+    return 0 if cnt0 > cnt1 else 1
+
+
+def gini_index(dataset: np.ndarray) -> float:
+    """计算数据集基尼不纯度"""
+    total = len(dataset)
+    if total == 0:
+        return 0.0
+    labels = dataset[:, -1]
+    unique_labels = np.unique(labels)
+    prob_sum = 0.0
+    for label in unique_labels:
+        p = np.sum(labels == label) / total
+        prob_sum += p ** 2
+    return 1 - prob_sum
+
+
+def select_best_feature(
+    dataset: np.ndarray,
+    m_feat: int,
+    task_type: str = TASK_REGRESSION
+) -> tuple[Union[int, None], Union[float, int]]:
+    """
+    随机选取m个特征，遍历寻找最优分裂特征与阈值
+    :param dataset: 数据集
+    :param m_feat: 单棵树随机选取特征数量
+    :param task_type: 任务类型 regression / classification
+    :return: (最优特征下标, 分裂阈值)，无增益时返回(None, 叶节点值)
+    """
+    n_feats = dataset.shape[1] - 1  # 最后一列是标签，不算特征
+    # 随机抽取m个特征下标
+    rand_feat_idx = np.random.randint(0, n_feats, size=m_feat)
+    # 计算分裂前整体损失
+    if task_type == TASK_REGRESSION:
+        base_loss = reg_error(dataset)
+    else:
+        base_loss = gini_index(dataset)
+
+    best_loss = inf
+    best_feat = None
+    best_split_val = None
+
+    for feat in rand_feat_idx:
+        # 获取该特征所有唯一分裂点
+        feat_vals = np.unique(dataset[:, feat])
+        for val in feat_vals:
+            mat0, mat1 = bin_split_dataset(dataset, feat, val)
+            # 计算分裂后总损失
+            if task_type == TASK_REGRESSION:
+                current_loss = reg_error(mat0) + reg_error(mat1)
+            else:
+                current_loss = gini_index(mat0) + gini_index(mat1)
+            # 更新最优分裂
+            if current_loss < best_loss:
+                best_loss = current_loss
+                best_feat = feat
+                best_split_val = val
+
+    # 分裂增益不足，直接返回叶节点
+    gain = base_loss - best_loss
+    if gain < 0.001:
+        if task_type == TASK_REGRESSION:
+            return None, reg_leaf(dataset)
+        else:
+            return None, majority_class(dataset)
+
+    return best_feat, best_split_val
+
+
+def create_tree(
+    dataset: np.ndarray,
+    task_type: str = TASK_REGRESSION,
+    m_feat: int = 20,
+    max_depth: int = 10
+) -> Union[Dict[str, Any], float, int]:
+    """递归构建单棵CART决策树"""
+    best_feat, split_val = select_best_feature(dataset, m_feat, task_type)
+    # 无分裂增益，返回叶子
+    if best_feat is None:
+        return split_val
+    # 达到最大深度，提前剪枝
+    if max_depth <= 0:
+        if task_type == TASK_REGRESSION:
+            return reg_leaf(dataset)
+        else:
+            return majority_class(dataset)
+
+    tree = {
+        "best_feature": best_feat,
+        "split_value": split_val
+    }
+    mat_left, mat_right = bin_split_dataset(dataset, best_feat, split_val)
+    # 递归构建左右子树，深度-1
+    tree["left"] = create_tree(mat_left, task_type, m_feat, max_depth - 1)
+    tree["right"] = create_tree(mat_right, task_type, m_feat, max_depth - 1)
+    return tree
+
+
+def random_forest(
+    dataset: np.ndarray,
+    n_trees: int,
+    task_type: str = TASK_REGRESSION,
+    m_feat: int = 20,
+    max_depth: int = 10
+) -> List[Union[Dict[str, Any], float, int]]:
+    """
+    训练随机森林（标准Bagging：有放回采样生成子集，而非原代码错误切分train_test）
+    :param dataset: 完整数据集（特征+标签）
+    :param n_trees: 树数量
+    :param task_type: 回归/分类
+    :param m_feat: 单树随机特征数
+    :param max_depth: 单树最大深度
+    :return: 训练完成的树列表
+    """
+    tree_list = []
+    # Bootstrap采样生成多份样本子集
+    subsamples = get_subsamples(dataset, n_trees)
+    for sub_data in subsamples:
+        tree = create_tree(sub_data, task_type, m_feat, max_depth)
+        tree_list.append(tree)
+    return tree_list
+
+
+def tree_predict_single(tree: Union[Dict, float, int], sample: np.ndarray, task_type: str) -> Union[float, int]:
+    """单棵树对单个样本预测"""
+    # 当前节点是叶子，直接返回值
+    if not isinstance(tree, dict):
+        if task_type == TASK_REGRESSION:
+            return float(tree)
+        else:
+            return int(tree)
+
+    feat_idx = tree["best_feature"]
+    split_val = tree["split_value"]
+    if sample[feat_idx] > split_val:
+        return tree_predict_single(tree["left"], sample, task_type)
+    else:
+        return tree_predict_single(tree["right"], sample, task_type)
+
+
+def predict_single_tree_batch(tree: Union[Dict, float, int], data: np.ndarray, task_type: str) -> np.ndarray:
+    """单棵树批量预测整个数据集"""
+    n = len(data)
+    pred = np.zeros((n, 1))
+    for i in range(n):
+        pred[i, 0] = tree_predict_single(tree, data[i], task_type)
+    return pred
+
+
+def rf_predict(rf_trees: List, test_data: np.ndarray, task_type: str) -> np.ndarray:
+    """
+    随机森林批量预测
+    :param rf_trees: 训练好的森林
+    :param test_data: 待预测数据（仅特征，不含标签）
+    :param task_type: 回归/分类
+    :return: 预测结果矩阵 [n_sample, 1]
+    """
+    n_sample = len(test_data)
+    pred_sum = np.zeros((n_sample, 1))
+
+    # 累加所有树预测结果
+    for tree in rf_trees:
+        batch_pred = predict_single_tree_batch(tree, test_data, task_type)
+        pred_sum += batch_pred
+
+    if task_type == TASK_REGRESSION:
+        # 回归：取所有树平均值
+        pred_result = pred_sum / len(rf_trees)
+    else:
+        # 二分类投票：超过半数为1，否则0
+        threshold = len(rf_trees) / 2
+        pred_result = np.where(pred_sum > threshold, 1, 0)
+
+    return pred_result
+
+
+if __name__ == '__main__':
+    # 1. 生成数据集
+    full_data = get_datasets(n_samples=200, n_features=100, n_classes=2)
+    X_all = full_data[:, :-1]
+    y_all = full_data[:, -1:]
+    print("真实标签转置：\n", y_all.T)
+
+    # 2. 训练分类随机森林，4棵树
+    rf_model = random_forest(
+        dataset=full_data,
+        n_trees=4,
+        task_type=TASK_CLASSIFICATION,
+        m_feat=20,
+        max_depth=10
+    )
+    print("==================== 随机森林训练完成 ====================")
+
+    # 3. 预测
+    y_pred = rf_predict(rf_model, X_all, task_type=TASK_CLASSIFICATION)
+    print("预测结果转置：\n", y_pred.T)
+
+    # 4. 输出残差
+    residual = y_all.T - y_pred.T
+    print("真实值-预测值残差：\n", residual)
+
+
+
+----历史版特意放在这里----
 from numpy import inf
 from numpy import zeros
 import numpy as np
