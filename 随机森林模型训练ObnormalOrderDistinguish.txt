@@ -1,0 +1,98 @@
+--作者苏美婷，严禁抄袭--
+//随机森林,特征不经过one-hot，特征加进各类别的商品数， 去掉is_single_cate, goods_cate, goods_cate_num三个特征
+//涉及到用户的历史购买记录、固定时间窗口为前一年
+//使用到的订单特征表有改变
+//类别多了一个“7b_纸尿裤”
+//goods_amount_ 多了一个
+//多一个add_month 20170811
+//fst_source变更为6个，去掉不合格订单
+val sqlStmt1 = "select * from temp_bi.sumt_anls_eigen_value_1_0814 where to_date(add_time)>='2016-01-01' and to_date(add_time)<='2017-06-30'"
+val positiveSample = sqlContext.sql(sqlStmt1)
+
+val sqlStmt2 = "select * from temp_bi.sumt_anls_eigen_value_0_0814 where to_date(add_time)>='2017-03-21' and to_date(add_time)<='2017-06-30'"
+val negativeSample = sqlContext.sql(sqlStmt2)
+
+ import org.apache.spark.mllib.tree.DecisionTree
+ import org.apache.spark.mllib.tree.model.DecisionTreeModel
+ import org.apache.spark.mllib.util.MLUtils
+ import org.apache.spark.mllib.regression.LabeledPoint
+ import org.apache.spark.mllib.linalg.Vectors
+ import org.apache.spark.sql.{DataFrame, Row, SQLContext}
+ import org.apache.spark.mllib.linalg.DenseVector
+ import org.apache.spark.sql.hive.HiveContext
+ import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
+ import java.math.BigDecimal
+ import org.apache.spark.mllib.tree.RandomForest
+ import org.apache.spark.rdd.RDD
+
+def featureTransformV7(data: DataFrame, label: Int) = {
+val cataValueMap: Map[String, Int] = Map("1_女装"->1, "2_男装"->2, "3_内衣"->3, "4_鞋类"->4, "5_箱包"->5,
+	"6a_彩妆"->6, "6b_护肤"->7, "7_亲子"->8, "7a_奶粉"->9, "7b_纸尿裤"->10, "8_体用户外"->11,
+	"9_家电"->12, "9a_手机通讯"->13, "10_家居家纺"->14, "11_精品"->15, "11a_珠宝饰品"->16,
+	"11b_钟表"->17, "12_食品"->18, "13_汽车用品"->19, "14_实体票券"->20, "15_图书"->21,
+	"多品类"->22, "16其他"->23, "无"->24)
+val vmarkValueMap: Map[String, Int] = Map("皇冠"->1, "钻石"->2, "金牌"->3, "银牌"->4, "铜牌"->5, "铁牌"->6)
+val fstSourceValueMap: Map[String, Int] = Map("pc"->0, "weixin"->1,"wap"->2,"android"->3,"iphone"->4,"ipad"->5, "unknown"->0)  
+val rdd = data.map( a=> {
+  val dimension = 43
+  val featureArray:Array[Double] = new Array[Double](dimension) 
+  featureArray(0) = a.getDouble(6)
+  featureArray(1) = a.getDouble(7)
+  for(i <- 2 to 8){
+	featureArray(i) = a.getLong(i + 7).toDouble
+  }
+  featureArray(9) = a.getDouble(16)
+  featureArray(10) = a.getDecimal(17).doubleValue()
+  featureArray(11) = a.getLong(18).toDouble
+  featureArray(12) = a.getDouble(19)  
+  featureArray(13) = a.getLong(24) //is_phone_share
+  featureArray(14) = a.getInt(25).toDouble
+  featureArray(15) = a.getInt(26).toDouble 
+  val vmark_name = a.getString(27).trim()
+  featureArray(16) = vmarkValueMap(vmark_name)-1 
+  featureArray(17) = a.getLong(28).toDouble 
+  val max_hist_goods_cate = a.getString(29).trim()
+  featureArray(18) = cataValueMap(max_hist_goods_cate)-1 
+  featureArray(19) = a.getDouble(30)
+  val fst_source = a.getString(31).trim()
+  featureArray(20) = fstSourceValueMap(fst_source)
+  for(i <- 21 to 42){
+	featureArray(i) = a.getLong(i + 11).toDouble
+  }
+  val vector = new DenseVector(featureArray)
+  LabeledPoint(label, vector)
+})
+rdd
+}
+
+val allPositive = featureTransformV7(positiveSample, 1)
+val allNegative = featureTransformV7(negativeSample, 0)
+val rdd = allPositive.union(allNegative)
+val Array(trainingData, testData) = rdd.randomSplit(Array(0.7, 0.3))
+testData.cache()
+
+val numClasses = 2
+val categoricalFeaturesInfo: Map[Int, Int] = Map(16->6, 18->24, 20->6) 
+val featureSubsetStrategy = "auto" 
+val impurity = "gini"
+val maxBins = 32
+
+val numTrees = 15
+val maxDepth = 14
+
+val rmModel = RandomForest.trainClassifier(trainingData, numClasses, categoricalFeaturesInfo,numTrees,featureSubsetStrategy, impurity, maxDepth, maxBins)
+val predsAndLabel = testData.map{ point =>
+val prediction = rmModel.predict(point.features)
+(prediction, point.label)
+}
+val predictPositive = predsAndLabel.filter(a => a._1 == 1.0)
+val predictPositiveNum = predictPositive.count()
+val truePositiveNum = predictPositive.filter(a => a._2 == 1.0).count()
+val testDataPositiveNum = testData.filter(a => a.label == 1.0).count()
+val precison = truePositiveNum.toDouble / predictPositiveNum
+val recall = truePositiveNum.toDouble / testDataPositiveNum
+
+println("numTrees: " + numTrees + " maxDepth: " + maxDepth + " precision: " + precison + " recall: " + recall)
+
+
+
