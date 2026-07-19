@@ -1,0 +1,528 @@
+/*
+1.全量订单
+temp_bi.sumt_anls_eigen_value
+2.刷单订单
+temp_bi.sumt_anls_eigen_value_0
+3.非刷单订单
+temp_bi.sumt_anls_eigen_value_1
+
+--特征值
+add_register_time,--下单时间距注册时间间隔
+add_gap_time,--下单间隔
+activate_register_time,--领券时间距注册时间间隔
+log_days_month,--下单前30天来访天数
+goods_num_month,--下单前30天浏览商品个数
+goods_num_day,--下单日浏览商品个数
+page_on_time_day,--下单日的在线时长
+order_hist,--历史订单数
+goods_cate_hist,--历史订单品类数
+brand_store_sn_hist,--历史订单品牌数
+quality_order_fav,--订单优惠力度
+quality_order_goods_cnt,--订单商品件数
+quality_order_goods_price,--订单商品件单价
+order_reject,--订单是否拒收
+is_single_cate,--订单是否单品类
+goods_cate,--订单品类名称
+goods_cate_num,--订单品类数量       
+is_phone_share,--是否与其他账号共用收货手机
+is_address_share,--是否与其他账号共用收货地址
+is_real_name,--是否实名认证状态
+vmark_name, --客户等级
+max_order_num, --历史订单中购买最多的品类的订单数
+max_hist_goods_cate,--历史订单中购买最多的品类名称
+repeat_goods_rate --品类购买重复率
+*/
+
+--=======================2.行为特征========================--
+--下单时间距注册时间间隔
+--drop table temp_bi.sumt_anls_eigen_value_01;
+create table temp_bi.sumt_anls_eigen_value_01 as
+select a.order_id,a.order_sn,a.valid_flag,a.user_id,a.add_time,b.register_time,
+       case when b.register_time is null then (unix_timestamp(a.add_time)-unix_timestamp('2013-03-11 00:00:00'))/3600 else (unix_timestamp(a.add_time)-unix_timestamp(b.register_time))/3600 end as add_register_time
+from 
+(select order_id,order_sn,user_id,add_time,valid_flag
+ from temp_bi.sumt_anls_order_list where add_month>=201501 and add_month<=202107
+ group by order_id,order_sn,user_id,add_time,valid_flag) a
+left join 
+(select user_id,register_time
+ from temp_bi.sumt_anls_register_list    --脚本_客户养成规律清单
+ group by user_id,register_time) b on a.user_id=b.user_id;
+
+ 
+--下单间隔(相邻订单间隔的分钟数)
+--temp_bi.sumt_anls_eigen_value_02_bak(202106)
+drop table temp_bi.sumt_anls_eigen_value_02;
+create table temp_bi.sumt_anls_eigen_value_02 as
+select order_id,add_time,drk_time,add_time_before,add_time_next,
+       case when add_time_before is not null then (unix_timestamp(add_time)-unix_timestamp(add_time_before))/3600 else -99 end as add_before_time,
+       case when add_time_next is not null then (unix_timestamp(add_time_next)-unix_timestamp(add_time))/3600 else -99 end as add_next_time
+from (
+  select a.order_id,a.add_time,a.drk_time,b.add_time as add_time_before,c.add_time as add_time_next
+         --b.order_id as order_id_before,b.add_time as add_time_before,b.drk_time as drk_time_before,
+         --c.order_id as order_id_next,c.add_time as add_time_next,c.drk_time as drk_time_next
+  from 
+  (select order_id,user_id,add_time,dense_rank() over (partition by user_id order by add_time asc) drk_time 
+   from temp_bi.sumt_anls_order_list where add_month>=201501 and add_month<=202107
+   group by order_id,user_id,add_time) a
+  left join 
+  (select order_id,user_id,add_time,dense_rank() over (partition by user_id order by add_time asc) drk_time 
+   from temp_bi.sumt_anls_order_list where add_month>=201501 and add_month<=202107
+   group by order_id,user_id,add_time ) b
+   on a.user_id=b.user_id and a.drk_time=b.drk_time+1 --上一单
+  left join 
+  (select order_id,user_id,add_time,dense_rank() over (partition by user_id order by add_time asc) drk_time 
+   from temp_bi.sumt_anls_order_list where add_month>=201501 and add_month<=202107
+   group by order_id,user_id,add_time ) c
+   on a.user_id=c.user_id and a.drk_time=c.drk_time-1 --下一单
+  group by  a.order_id,a.add_time,a.drk_time,b.add_time,c.add_time
+ ) x
+ 
+ 
+--领券时间距注册时间间隔 ---没有领券的将时间设置为无穷大
+drop table temp_bi.sumt_anls_eigen_value_03;
+create table temp_bi.sumt_anls_eigen_value_03 as
+select a.order_id,a.order_sn,a.user_id,a.add_time,a.register_time,b.activate_time,b.use_time,
+       case when b.activate_time is null then 10000 else (unix_timestamp(b.activate_time)-unix_timestamp(a.register_time))/3600 end as activate_register_time
+from 
+(select a.order_id,a.order_sn,a.user_id,a.add_time,b.register_time
+ from (select order_id,order_sn,user_id,add_time from temp_bi.sumt_anls_order_list where add_month>=201501 and add_month<=202107 ) a
+ left join 
+ (select user_id,register_time
+  from temp_bi.sumt_anls_register_list
+  group by user_id,register_time) b on a.user_id=b.user_id
+ group by a.order_id,a.order_sn,a.user_id,a.add_time,b.register_time) a
+left join 
+(select use_order_sn,min(activate_time) as activate_time,use_time  ---一个订单会不会对应多张券，取最早的券时间
+ from (select user_id,coupon_sn,use_order_sn,
+         activate_time,--激活时间	
+         use_time,--使用时间	
+         begin_time,--开始时间	
+         end_time --结束时间
+  from dw.dw_pmsapi_coupon_instance 
+  where dt=get_dt_date(get_date(-1)) and status=0 --已使用
+ 	 ) x
+ group by use_order_sn,use_time 
+) b on a.order_sn=b.use_order_sn;
+
+--下单前30天来访天数/浏览商品个数/在线时长
+--脚本-2.下单前30天来访天数
+select order_id,user_id,cookie_id,add_date,add_time,sum(log_days) as log_days,sum(goods_num) as goods_num,sum(page_on_time) as page_on_time
+from temp_bi.sumt_anls_eigen_value_04_1
+group by order_id,user_id,cookie_id,add_date,add_time
+
+--下单日的在线时长/浏览商品个数
+--脚本-3.下单日停留时长
+select order_id,user_id,cookie_id,add_date,add_time,sum(goods_num) as goods_num,sum(page_on_time) as page_on_time
+from temp_bi.sumt_anls_eigen_value_05_1
+group by order_id,user_id,cookie_id,add_date,add_time
+
+--历史订单数/品类数/品牌数
+--drop table temp_bi.sumt_anls_eigen_value_06;
+--create table temp_bi.sumt_anls_eigen_value_06 as
+insert overwrite table temp_bi.sumt_anls_eigen_value_06
+select * from temp_bi.sumt_anls_eigen_value_06 where 1=0;
+
+insert into table temp_bi.sumt_anls_eigen_value_06
+select a.order_id,a.user_id,a.add_time,
+       count(distinct b.order_id) as order_hist,
+       count(distinct b.goods_cate) as goods_cate_hist,
+       count(distinct b.brand_store_sn) as brand_store_sn_hist
+from 
+(select order_id,user_id,add_time,add_date 
+ from temp_bi.sumt_anls_order_list where add_month>=201601 and add_month<=201612 group by order_id,user_id,add_time,add_date ) a
+join 
+(select order_id,user_id,add_time,add_date,goods_cate,brand_store_sn
+ from temp_bi.sumt_anls_order_list where add_month>=201501 group by order_id,user_id,add_time,add_date,goods_cate,brand_store_sn ) b on a.user_id=b.user_id 
+where datediff(a.add_date,b.add_date)<=365 and datediff(a.add_date,b.add_date)>=0 and b.add_time<a.add_time
+group by a.order_id,a.user_id,a.add_time;
+
+insert into table temp_bi.sumt_anls_eigen_value_06
+select a.order_id,a.user_id,a.add_time,
+       count(distinct b.order_id) as order_hist,
+       count(distinct b.goods_cate) as goods_cate_hist,
+       count(distinct b.brand_store_sn) as brand_store_sn_hist
+from 
+(select order_id,user_id,add_time,add_date 
+ from temp_bi.sumt_anls_order_list where add_month>=202101 and add_month<=202107 group by order_id,user_id,add_time,add_date ) a
+join 
+(select order_id,user_id,add_time,add_date,goods_cate,brand_store_sn
+ from temp_bi.sumt_anls_order_list where add_month>=201501 group by order_id,user_id,add_time,goods_cate,brand_store_sn,add_date ) b on a.user_id=b.user_id 
+where datediff(a.add_date,b.add_date)<=365 and datediff(a.add_date,b.add_date)>=0 and b.add_time<a.add_time
+group by a.order_id,a.user_id,a.add_time;
+
+
+--=================3.订单特征===================--
+--订单优惠力度/商品件数/件单价
+--drop table temp_bi.sumt_anls_eigen_value_07;
+create table temp_bi.sumt_anls_eigen_value_07 as
+select order_id,user_id,add_time,
+       case when (quality_order_goods_amt=0 or quality_order_goods_amt is null) then total_goods_amt else quality_order_goods_amt end as order_goods_amt,--订单金额  
+       case when (quality_order_goods_amt=0 or quality_order_goods_amt is null) then fav_amt*1.0/total_goods_amt else fav_amt*1.0/quality_order_goods_amt end as quality_order_fav,--优惠力度       
+       quality_order_goods_cnt,--合格订单商品件数（含拒退）
+       case when total_goods_cnt is null then 0 else total_goods_cnt end as total_goods_cnt,
+       case when (quality_order_goods_cnt is null or quality_order_goods_cnt=0) then total_goods_cnt else quality_order_goods_cnt end as order_goods_cnt,
+       case when (quality_order_goods_amt=0 or quality_order_goods_amt is null) then total_goods_amt*1.0/total_goods_cnt else quality_order_goods_amt*1.0/quality_order_goods_cnt end as quality_order_goods_price, --商品件单价
+       order_reject --是否拒收
+from temp_bi.sumt_anls_order_fav_list
+where year(add_time)*100+month(add_time)>=201601 and year(add_time)*100+month(add_time)<=202107;
+
+--订单品类是否单品类/品类名称or多品类/品类数量
+drop table if exists temp_bi.sumt_anls_eigen_value_08;
+create table temp_bi.sumt_anls_eigen_value_08 as
+select a.order_id,a.user_id,a.add_time,
+       case when a.num=1 then 1 else 0 end as is_single_cate,--是否单品类
+       a.num as goods_cate_num, --品类数
+	   case when a.num=1 then b.goods_cate else '多品类' end as goods_cate
+from
+(select order_id,user_id,add_time,count(distinct goods_cate) as num
+ from temp_bi.sumt_anls_order_list 
+ where add_month>=201501 and add_month<=202107
+ group by order_id,user_id,add_time) a
+ left join
+ (select a2.order_id,a2.goods_cate
+  from 
+ (select order_id,count(distinct goods_cate)
+   from temp_bi.sumt_anls_order_list 
+   where  add_month>=201501
+   group by order_id
+   having count(distinct goods_cate)=1 ) a1 ---单品类订单
+   join (select order_id,goods_cate from temp_bi.sumt_anls_order_list 
+        where  add_month>=201501 group by order_id,goods_cate) a2 on a1.order_id=a2.order_id ---关联取品类名称
+  group by  a2.order_id,a2.goods_cate --去重
+  ) b
+ on a.order_id=b.order_id 
+group by a.order_id,a.user_id,a.add_time,
+       case when a.num=1 then 1 else 0 end,--是否单品类
+       a.num, --品类数
+	   case when a.num=1 then b.goods_cate else '多品类' end;
+
+--==================4.购买者身份信息=======================--
+--是否与其他账号共用收货手机
+/*--drop table if exists temp_bi.sumt_anls_eigen_value_09; --20210812之前
+create table temp_bi.sumt_anls_eigen_value_09 as
+select a.order_id,a.add_time,a.user_id,
+       case when b.user_num>1 then 1 else 0 end as is_phone_share --是否与其他账号共用收货手机
+from
+(select order_id,add_time,user_id,hash_phone
+ from temp_bi.sumt_anls_order_fav_list 
+ where year(add_time)*100+month(add_time)>=201601 and year(add_time)*100+month(add_time)<=202107
+ group by order_id,add_time,user_id,hash_phone) a
+join
+(select hash_phone,count(distinct user_id) as user_num
+ from temp_bi.sumt_anls_order_fav_list where year(add_time)>=2015
+ group by hash_phone) b on a.hash_phone=b.hash_phone
+group by a.order_id,a.add_time,a.user_id,case when b.user_num>1 then 1 else 0 end;*/
+
+--测试中
+create table temp_bi.sumt_anls_eigen_value_09_1 as
+select order_id,add_time,user_id,hash_phone,count(distinct user_id2) as is_phone_share
+from (
+select a.order_id,a.add_time,a.user_id,a.hash_phone,b.user_id as user_id2
+   from
+   (select order_id,add_time,user_id,hash_phone
+    from temp_bi.sumt_anls_order_fav_list 
+    where year(add_time)*100+month(add_time)>=201601 and year(add_time)*100+month(add_time)<=201606
+	and hash_phone is not null and hash_phone<>'15aa9d50ec2463a18c63696e'  --该号码数据倾斜
+    group by order_id,add_time,user_id,hash_phone) a
+   join
+   (select hash_phone,user_id,add_time
+    from temp_bi.sumt_anls_order_fav_list where year(add_time)*100+month(add_time)>=201509 and year(add_time)*100+month(add_time)<=201606
+	and hash_phone is not null and hash_phone<>'15aa9d50ec2463a18c63696e'  --该号码数据倾斜
+    group by hash_phone,user_id,add_time) b on a.hash_phone=b.hash_phone
+   where datediff(to_date(a.add_time),to_date(b.add_time))<=90 and datediff(to_date(a.add_time),to_date(b.add_time))>=0 and b.add_time<a.add_time
+	group by a.order_id,a.add_time,a.user_id,a.hash_phone,b.user_id 
+	) x
+	group by order_id,add_time,user_id,hash_phone;
+
+insert into table temp_bi.sumt_anls_eigen_value_09_1 
+select order_id,add_time,user_id,hash_phone,count(distinct user_id2) as is_phone_share
+from (
+select a.order_id,a.add_time,a.user_id,a.hash_phone,b.user_id as user_id2
+   from
+   (select order_id,add_time,user_id,hash_phone
+    from temp_bi.sumt_anls_order_fav_list 
+    where year(add_time)*100+month(add_time)>=201607 and year(add_time)*100+month(add_time)<=201612
+	and hash_phone is not null and hash_phone<>'15aa9d50ec2463a18c63696e'  --该号码数据倾斜
+    group by order_id,add_time,user_id,hash_phone) a
+   join
+   (select hash_phone,user_id,add_time
+    from temp_bi.sumt_anls_order_fav_list where year(add_time)*100+month(add_time)>=201604 and year(add_time)*100+month(add_time)<=201612
+	and hash_phone is not null and hash_phone<>'15aa9d50ec2463a18c63696e'  --该号码数据倾斜
+    group by hash_phone,user_id,add_time) b on a.hash_phone=b.hash_phone
+   where datediff(to_date(a.add_time),to_date(b.add_time))<=90 and datediff(to_date(a.add_time),to_date(b.add_time))>=0 and b.add_time<a.add_time
+	group by a.order_id,a.add_time,a.user_id,a.hash_phone,b.user_id 
+	) x
+	group by order_id,add_time,user_id,hash_phone;
+
+insert into table temp_bi.sumt_anls_eigen_value_09_1 
+select order_id,add_time,user_id,hash_phone,count(distinct user_id2) as is_phone_share
+from (
+select a.order_id,a.add_time,a.user_id,a.hash_phone,b.user_id as user_id2
+   from
+   (select order_id,add_time,user_id,hash_phone
+    from temp_bi.sumt_anls_order_fav_list 
+    where year(add_time)*100+month(add_time)>=202101 and year(add_time)*100+month(add_time)<=202107
+	and hash_phone is not null and hash_phone<>'15aa9d50ec2463a18c63696e'  --该号码数据倾斜
+    group by order_id,add_time,user_id,hash_phone) a
+   join
+   (select hash_phone,user_id,add_time
+    from temp_bi.sumt_anls_order_fav_list where year(add_time)*100+month(add_time)>=201610 and year(add_time)*100+month(add_time)<=202107
+	and hash_phone is not null and hash_phone<>'15aa9d50ec2463a18c63696e'  --该号码数据倾斜
+    group by hash_phone,user_id,add_time) b on a.hash_phone=b.hash_phone
+   where datediff(to_date(a.add_time),to_date(b.add_time))<=90 and datediff(to_date(a.add_time),to_date(b.add_time))>=0 and b.add_time<a.add_time
+	group by a.order_id,a.add_time,a.user_id,a.hash_phone,b.user_id 
+	) x
+	group by order_id,add_time,user_id,hash_phone;
+
+drop table if exists temp_bi.sumt_anls_eigen_value_09_0812;
+create table temp_bi.sumt_anls_eigen_value_09_0812 as 
+select order_id,add_time,user_id,hash_phone,_c4 as is_phone_share from temp_bi.sumt_anls_eigen_value_09_1;
+	
+--是否与其他账号共用收货地址send_address
+/*--drop table if exists temp_bi.sumt_anls_eigen_value_10; --20210812之前
+create table temp_bi.sumt_anls_eigen_value_10 as
+select a.order_id,a.add_time,a.user_id,
+       case when b.user_num>1 then 1 else 0 end as is_address_share --是否与其他账号共用收货地址
+from
+(select order_id,add_time,user_id,send_address
+ from temp_bi.sumt_anls_order_fav_list where year(add_time)>=2016
+ group by order_id,add_time,user_id,send_address) a
+join
+(select send_address,count(distinct user_id) as user_num
+ from temp_bi.sumt_anls_order_fav_list where year(add_time)>=2015
+ group by send_address) b on a.send_address=b.send_address
+group by a.order_id,a.add_time,a.user_id,case when b.user_num>1 then 1 else 0 end;
+--202107(已跑)
+insert into table temp_bi.sumt_anls_eigen_value_10 
+select a.order_id,a.add_time,a.user_id,
+       case when b.user_num>1 then 1 else 0 end as is_address_share --是否与其他账号共用收货地址
+from
+(select order_id,add_time,user_id,send_address
+ from temp_bi.sumt_anls_order_fav_list where year(add_time)*100+month(add_time)=202107
+ group by order_id,add_time,user_id,send_address) a
+join
+(select send_address,count(distinct user_id) as user_num
+ from temp_bi.sumt_anls_order_fav_list where year(add_time)>=2015
+ group by send_address) b on a.send_address=b.send_address
+group by a.order_id,a.add_time,a.user_id,case when b.user_num>1 then 1 else 0 end;*/
+
+--测试中
+set mapred.reduce.tasks = 300;
+create table temp_bi.sumt_anls_eigen_value_10_1 as
+select order_id,add_time,user_id,send_address,count(distinct user_id2) as is_address_share
+from (
+select a.order_id,a.add_time,a.user_id,a.send_address,b.user_id as user_id2
+   from
+   (select order_id,add_time,user_id,send_address
+    from temp_bi.sumt_anls_order_fav_list 
+    where year(add_time)*100+month(add_time)>=201601 and year(add_time)*100+month(add_time)<=201606
+	  and send_address is not null 
+    group by order_id,add_time,user_id,send_address) a
+   join
+   (select send_address,user_id,add_time
+    from temp_bi.sumt_anls_order_fav_list where year(add_time)*100+month(add_time)>=201510 and year(add_time)*100+month(add_time)<=201606
+	  and send_address is not null 
+    group by send_address,user_id,add_time) b on a.send_address=b.send_address
+   where datediff(to_date(a.add_time),to_date(b.add_time))<=90 and datediff(to_date(a.add_time),to_date(b.add_time))>=0 and b.add_time<a.add_time
+	group by a.order_id,a.add_time,a.user_id,a.send_address,b.user_id 
+	) x
+	group by order_id,add_time,user_id,send_address;
+	
+insert into table temp_bi.sumt_anls_eigen_value_10_1
+select order_id,add_time,user_id,send_address,count(distinct user_id2) as is_address_share
+from (
+select a.order_id,a.add_time,a.user_id,a.send_address,b.user_id as user_id2
+   from
+   (select order_id,add_time,user_id,send_address
+    from temp_bi.sumt_anls_order_fav_list 
+    where year(add_time)*100+month(add_time)>=201607 and year(add_time)*100+month(add_time)<=201612
+	  and send_address is not null 
+    group by order_id,add_time,user_id,send_address) a
+   join
+   (select send_address,user_id,add_time
+    from temp_bi.sumt_anls_order_fav_list where year(add_time)*100+month(add_time)>=201604 and year(add_time)*100+month(add_time)<=201612
+	  and send_address is not null 
+    group by send_address,user_id,add_time) b on a.send_address=b.send_address
+   where datediff(to_date(a.add_time),to_date(b.add_time))<=90 and datediff(to_date(a.add_time),to_date(b.add_time))>=0 and b.add_time<a.add_time
+	group by a.order_id,a.add_time,a.user_id,a.send_address,b.user_id 
+	) x
+	group by order_id,add_time,user_id,send_address;
+	
+insert into table temp_bi.sumt_anls_eigen_value_10_1
+select order_id,add_time,user_id,send_address,count(distinct user_id2) as is_address_share
+from (
+select a.order_id,a.add_time,a.user_id,a.send_address,b.user_id as user_id2
+   from
+   (select order_id,add_time,user_id,send_address
+    from temp_bi.sumt_anls_order_fav_list 
+    where year(add_time)*100+month(add_time)>=202101 and year(add_time)*100+month(add_time)<=202107
+	  and send_address is not null 
+    group by order_id,add_time,user_id,send_address) a
+   join
+   (select send_address,user_id,add_time
+    from temp_bi.sumt_anls_order_fav_list where year(add_time)*100+month(add_time)>=201610 and year(add_time)*100+month(add_time)<=202107
+	  and send_address is not null 
+    group by send_address,user_id,add_time) b on a.send_address=b.send_address
+   where datediff(to_date(a.add_time),to_date(b.add_time))<=90 and datediff(to_date(a.add_time),to_date(b.add_time))>=0 and b.add_time<a.add_time
+	group by a.order_id,a.add_time,a.user_id,a.send_address,b.user_id 
+	) x
+	group by order_id,add_time,user_id,send_address;
+				
+--实名认证状态
+--temp_bi.sumt_user_age_sex 脚本_uv清单
+drop table if exists temp_bi.sumt_anls_eigen_value_11;
+create table temp_bi.sumt_anls_eigen_value_11 as
+select a.order_id,a.add_time,a.user_id,
+       case when b.user_id is not null then 1 else 0 end as is_real_name --是否实名认证状态
+from
+(select order_id,add_time,user_id
+ from temp_bi.sumt_anls_order_fav_list where year(add_time)>=2015
+ group by order_id,add_time,user_id) a
+join (select user_id from temp_bi.sumt_user_age_sex group by user_Id) b on a.user_id=b.user_id  --脚本_uv清单
+group by a.order_id,a.add_time,a.user_id,case when b.user_id is not null then 1 else 0 end;
+--202107(已跑)
+insert into table temp_bi.sumt_anls_eigen_value_11
+select a.order_id,a.add_time,a.user_id,
+       case when b.user_id is not null then 1 else 0 end as is_real_name --是否实名认证状态
+from
+(select order_id,add_time,user_id
+ from temp_bi.sumt_anls_order_fav_list where year(add_time)*100+month(add_time)=202107
+ group by order_id,add_time,user_id) a
+join (select user_id from temp_bi.sumt_user_age_sex group by user_Id) b on a.user_id=b.user_id  --脚本_uv清单
+group by a.order_id,a.add_time,a.user_id,case when b.user_id is not null then 1 else 0 end;
+
+--会员等级
+--sumt_user_vmark_list脚本_uv清单
+--drop table if exists temp_bi.sumt_anls_eigen_value_12;
+create table temp_bi.sumt_anls_eigen_value_12 as
+select a.order_id,a.add_time,a.user_id,case when (b.vmark_name is null or b.vmark_name='未知') then '铁牌' else b.vmark_name end as vmark_name
+from 
+(select order_id,add_time,user_id,year(add_time)*100+month(add_time) as add_month
+ from temp_bi.sumt_anls_order_fav_list where year(add_time)>=2015
+ group by order_id,add_time,user_id) a
+left join
+(select user_id,month_id,vmark_name from temp_bi.sumt_user_vmark_list) b on a.user_id=b.user_id and a.add_month=b.month_id
+group by a.order_id,a.add_time,a.user_id,b.vmark_name,case when (b.vmark_name is null or b.vmark_name='未知') then '铁牌' else b.vmark_name end;
+--202107(已跑)
+insert into table temp_bi.sumt_anls_eigen_value_12 
+select a.order_id,a.add_time,a.user_id,case when (b.vmark_name is null or b.vmark_name='未知') then '铁牌' else b.vmark_name end as vmark_name
+from 
+(select order_id,add_time,user_id,year(add_time)*100+month(add_time) as add_month
+ from temp_bi.sumt_anls_order_fav_list where year(add_time)*100+month(add_time)=202107
+ group by order_id,add_time,user_id) a
+left join
+(select user_id,month_id,vmark_name from temp_bi.sumt_user_vmark_list) b on a.user_id=b.user_id and a.add_month=b.month_id
+group by a.order_id,a.add_time,a.user_id,b.vmark_name,case when (b.vmark_name is null or b.vmark_name='未知') then '铁牌' else b.vmark_name end;
+
+--===============5.补充信息================--
+--品类重复最多的历史订单
+--4.品类重复购买率
+drop table temp_bi.sumt_anls_eigen_value_13;
+create table temp_bi.sumt_anls_eigen_value_13 as
+select * from temp_bi.sumt_anls_eigen_value_06_1;
+
+--下单一级平台
+/*--drop table if exists temp_bi.sumt_anls_eigen_value_14;  --20210812之前
+create table temp_bi.sumt_anls_eigen_value_14 as
+select order_id,add_time,user_Id,
+case when fst_source='pc' then  'pc' when fst_source='mobile'  then 'mobile' else 'unknown' end as fst_source
+from temp_bi.sumt_anls_order_list
+where add_month>=201601
+group by order_id,add_time,user_Id,hen fst_source='pc' then  'pc' when fst_source='mobile'  then 'mobile' else 'unknown' end;*/
+
+drop table if exists temp_bi.sumt_anls_eigen_value_14;
+create table temp_bi.sumt_anls_eigen_value_14 as
+select order_id,add_time,user_Id,
+case when sec_source='web' then 'pc' when sec_source='weixin' then 'weixin' when  sec_source='wap' then 'wap' 
+when sec_source='app' and thr_source='android' then 'android' when sec_source='app' and thr_source='iphone' then 'iphone' 
+when sec_source='app' and thr_source='ipad' then 'ipad' else 'unknown' end as fst_source
+from temp_bi.sumt_anls_order_list
+where add_month>=201601 and add_month<=202107
+group by order_id,add_time,user_Id,
+         case when sec_source='web' then 'pc' when sec_source='weixin' then 'weixin' when  sec_source='wap' then 'wap' 
+when sec_source='app' and thr_source='android' then 'android' when sec_source='app' and thr_source='iphone' then 'iphone' 
+when sec_source='app' and thr_source='ipad' then 'ipad' else 'unknown' end;
+
+--
+--202107(已跑)
+insert into table temp_bi.sumt_anls_eigen_value_14 
+select order_id,add_time,user_Id,case when fst_source='pc' then  'pc' when fst_source='mobile'  then 'mobile' else 'unknown' end as fst_source
+from temp_bi.sumt_anls_order_list
+where add_month=202107
+group by order_id,add_time,user_Id,case when fst_source='pc' then  'pc' when fst_source='mobile'  then 'mobile' else 'unknown' end;============5.1补充信息20210725============--
+--各品类商品数
+--drop table if exists temp_bi.sumt_anls_eigen_value_15;
+create table temp_bi.sumt_anls_eigen_value_15 as
+select order_id,user_id,add_time,
+       sum(goods_amount) as goods_amount,
+       sum(case when goods_cate='1_女装' then goods_amount else 0 end) as goods_amount_1,
+       sum(case when goods_cate='2_男装' then goods_amount else 0 end) as goods_amount_2,
+       sum(case when goods_cate='3_内衣' then goods_amount else 0 end) as goods_amount_3,
+       sum(case when goods_cate='4_鞋类' then goods_amount else 0 end) as goods_amount_4,
+       sum(case when goods_cate='5_箱包' then goods_amount else 0 end) as goods_amount_5,
+       sum(case when goods_cate='6a_彩妆' then goods_amount else 0 end) as goods_amount_6,
+       sum(case when goods_cate='6b_护肤' then goods_amount else 0 end) as goods_amount_7,
+       sum(case when goods_cate='7a_奶粉' then goods_amount else 0 end) as goods_amount_8,
+       sum(case when goods_cate='7b_纸尿裤' then goods_amount else 0 end) as goods_amount_9,
+       sum(case when goods_cate='7_亲子' then goods_amount else 0 end) as goods_amount_10,
+       sum(case when goods_cate='8_体用户外' then goods_amount else 0 end) as goods_amount_11,
+       sum(case when goods_cate='9a_手机通讯' then goods_amount else 0 end) as goods_amount_12,
+       sum(case when goods_cate='9_家电' then goods_amount else 0 end) as goods_amount_13,
+       sum(case when goods_cate='10_家居家纺' then goods_amount else 0 end) as goods_amount_14,
+       sum(case when goods_cate='11a_珠宝饰品' then goods_amount else 0 end) as goods_amount_15,
+       sum(case when goods_cate='11b_钟表' then goods_amount else 0 end) as goods_amount_16,
+       sum(case when goods_cate='11_精品' then goods_amount else 0 end) as goods_amount_17,
+       sum(case when goods_cate='12_食品' then goods_amount else 0 end) as goods_amount_18,
+       sum(case when goods_cate='13_汽车用品' then goods_amount else 0 end) as goods_amount_19,
+       sum(case when goods_cate='14_实体票券' then goods_amount else 0 end) as goods_amount_20,
+       sum(case when goods_cate='15_图书' then goods_amount else 0 end) as goods_amount_21,
+       sum(case when goods_cate='16其他' then goods_amount else 0 end) as goods_amount_22
+from (
+select a.order_id,a.user_id,a.add_time,a.goods_cate,
+			 sum(a.goods_amount)+sum(a.back_goods_amount) as goods_amount
+from  temp_bi.sumt_anls_order_list a  
+where year(add_time)*100+month(add_time)>=201601 and year(add_time)*100+month(add_time)<=202107
+group by a.order_id,a.user_id,a.add_time,a.goods_cate
+) x
+group by order_id,user_id,add_time;
+
+
+
+/*
+--随机森林
+https://www.ibm.com/developerworks/cn/opensource/os-cn-spark-random-forest/
+http://blog.csdn.net/sinat_31726559/article/details/51946646
+
+--不使用的特征值
+case when a7.order_reject is null then 0 else a7.order_reject end as order_reject,--订单是否拒收 无意义
+case when a3.activate_register_time is null then 10000 when a3.activate_register_time<0 then 0 else a3.activate_register_time end as activate_register_time,--领券时间距注册时间间隔(小时)
+
+--一年花几百万的客户
+	select	user_id,sales,1 as is_tj,
+						   row_number() over( order by sales desc) sale_rank
+				from 	temp_bi.sumt_year_top5_list
+				
+select *
+from dw.dw_log_trd_order_day
+where dt between '20150101' and '20210531' and order_id=56000000002713309
+--订单流量表，一个订单为什么会有2条一模一样的记录呢？
+
+一注册就下单，买的多
+注册很久不访问，突然下单，买的多
+品牌集中
+品类集中
+
+
+select * from
+(
+select order_sn,
+       count(distinct new_category_1st_name) as goods_cate,
+       count(distinct brand_store_name) as brand_store_name,
+       sum(goods_amount) as goods_amount
+from temp_bi.sumt_anls_order_list
+where add_month=202105
+group by order_sn
+) x
+where goods_amount>=7 and brand_store_name=1
+*/
+
