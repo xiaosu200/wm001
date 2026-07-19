@@ -1,4 +1,9 @@
-#20260719记录：本人被某抄袭VSCODE自称国产自研的团队阴阳抄袭，一丢丢不爽，你给其他部门当枪使了知道吗，今天特亲自来更新优化代码--
+#20260719优化bug记录
+#删除未调用的死代码
+#用np.sum统计类别数量
+#新增空数据集判断，规避报错
+#简化循环逻辑
+#清理冗余 import
 #优化记录
 #新增get_subsamples做有放回随机采样，每棵树样本量和原数据集一致
 #修正拼写错误：RondomForest → random_forest；treeForecast → tree_predict_single
